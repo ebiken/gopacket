@@ -76,6 +76,8 @@ var udpPortLayerType = [65536]gopacket.LayerType{
 	68:   LayerTypeDHCPv4,
 	6343: LayerTypeSFlow,
 	6081: LayerTypeGeneve,
+	2123: LayerTypeGTP,
+	2152: LayerTypeGTP,
 }
 
 // RegisterUDPPortLayerType create a new mapping between an UDPPort

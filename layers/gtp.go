@@ -9,7 +9,9 @@ package layers
 import (
     "fmt"
 	"encoding/binary"
+	//"encoding/hex"
     "github.com/google/gopacket"
+	//"errors"
 )
 
 
@@ -45,7 +47,7 @@ import (
 //  N : N-PDU Number flag : not present (0), present (1)
 // Message Type: The type of GTP message defined in 3GPP TS 29.060 section 7.1
 // Message Length: The length in octets of the payload, i.e. the rest of the
-//   packet following the mandatory part of the GTP header (the first 8 octets)
+//   packet following the mandatory part of the GTP header.(the first 8 octets)
 //   The Sequence Number, the N-PDU Number or any Extension headers shall be
 //   considered to be part of the payload, i.e. included in the length count.
 // Tunnel Endpoint Identifier (TEID): an endpoint ID :-)
@@ -64,11 +66,11 @@ type GTPv1 struct {
 	BaseLayer
 	// Header Fields
 	Version                        uint8   // 3bit
-	ProtocolType                   uint8   // 1bit
-	Reserved                       uint8   // 1bit
-	ExtentionHeaderFlag            uint8   // 1bit 
-	SequenceNumberFlag             uint8   // 1bit
-	NPDUNumberFlag                 uint8   // 1bit
+	ProtocolType                   bool    // GTP(1:true), GTP'(0:false)
+	Reserved                       bool    // always 0:false
+	ExtentionHeaderFlag            bool
+	SequenceNumberFlag             bool
+	NPDUNumberFlag                 bool
 	MessageType                    uint8   // 8bit
 	MessageLength                  uint16  // 16bit
 	TEID                           uint32  // 32bit
@@ -93,19 +95,20 @@ func (g *GTPv1) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 		df.SetTruncated()
 		return fmt.Errorf("GTP packet too short")
 	}
+	// Decode mandatory header fields (8 bytes)
 	g.Version = (data[0] >>5) & 0x07
-	g.ProtocolType = (data[0] >> 4) & 0x01
-	g.Reserved = 0
-	g.ExtentionHeaderFlag = (data[0] >> 2) & 0x01
-	g.SequenceNumberFlag = (data[0] >> 1) & 0x01
-	g.NPDUNumberFlag = data[0] & 0x01
+	g.ProtocolType = data[0]&0x10 != 0 // <<4
+	g.Reserved     = data[0]&0x08 != 0 // <<3
+	g.ExtentionHeaderFlag = data[0]&0x04 != 0 // << 2
+	g.SequenceNumberFlag  = data[0]&0x02 != 0 // << 1
+	g.NPDUNumberFlag = data[0]&0x01 != 0 // <<0
 	g.MessageType = uint8(data[1])
 	g.MessageLength = binary.BigEndian.Uint16(data[2:4])
-	// fmt.Printf("MessageLength=%d\n", g.MessageLength)
 	g.BaseLayer = BaseLayer{Contents: data[:len(data) - int(g.MessageLength)]}
 	g.TEID = binary.BigEndian.Uint32(data[4:8])
 
-	if g.ExtentionHeaderFlag >0 || g.SequenceNumberFlag >0 || g.NPDUNumberFlag > 0 {
+	// Decode optional header fields
+	if g.ExtentionHeaderFlag || g.SequenceNumberFlag || g.NPDUNumberFlag {
 		g.SequenceNumber = binary.BigEndian.Uint16(data[8:10])
 		g.NPDUNumber = uint8(data[10])
 		g.NextExtentionHeaderType = uint8(data[11])
@@ -119,9 +122,55 @@ func (g *GTPv1) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 // SerializeTo writes the serialized form of this layer into the
 // SerializationBuffer, implementing gopacket.SerializableLayer.
 // See the docs for gopacket.SerializableLayer for more info.
-//func (g *GTPv1) SerializeTo(b gopacket.SerializeBuffer, opts gopacket.SerializeOptions) error {
-// TODO: 
-//}
+func (g *GTPv1) SerializeTo(b gopacket.SerializeBuffer, opts gopacket.SerializeOptions) error {
+
+	//fmt.Println("DEBUG: entering SerializeTo")
+	// Validate Fields
+	// Validate Message Length
+	// err := g.ValidateMessageLength()
+	// if err != nil { return err }
+	if g.ExtentionHeaderFlag || g.SequenceNumberFlag || g.NPDUNumberFlag {
+		if g.MessageLength < 4 {
+			return fmt.Errorf("GTP: Message Length too short %d", g.MessageLength)
+		}
+	} else {
+		if g.MessageLength != 0 { // only mandatory fields exist
+			return fmt.Errorf("GTP: Message Length should be 0. No optional fields.")
+		}
+	}
+	if g.Version != 1 { return fmt.Errorf("GTP: Version should be 1.") }
+	if g.Reserved { return fmt.Errorf("GTP: Reserved is always 0.") }
+
+	///fmt.Println("DEBUG: Validatoin completed.")
+
+	// TODO: support options.FixLengths = true
+	buf, err := b.PrependBytes(int(g.MessageLength+8))
+	if err != nil { return err }
+	//fmt.Println("DEBUG: PrependBytes Success.", g.MessageLength+8)
+	//fmt.Println( "buf:", hex.EncodeToString(buf))
+
+	// Set fields
+	// set version first to fill any potentially dirty memory in the first byte to 0.
+	buf[0] = g.Version << 5
+	if g.ProtocolType { buf[0] |= 0x10 } // <<4
+	if g.ExtentionHeaderFlag { buf[0] |= 0x04 } // <<2
+	if g.SequenceNumberFlag { buf[0] |= 0x02 } // <<1
+	if g.NPDUNumberFlag { buf[0] |= 0x01 } //0
+	buf[1] = g.MessageType
+	binary.BigEndian.PutUint16(buf[2:], uint16(g.MessageLength))
+	binary.BigEndian.PutUint32(buf[4:], uint32(g.TEID))
+	// set optional fields. buf size is 12+ if any of the Flags was set.
+	if g.SequenceNumberFlag {
+		binary.BigEndian.PutUint16(buf[8:], uint16(g.SequenceNumber))
+	}
+	if g.NPDUNumberFlag {
+		buf[10] = g.NPDUNumber
+	}
+	if g.ExtentionHeaderFlag {
+		buf[11] = g.NextExtentionHeaderType
+	}
+	return nil
+}
 
 func (g *GTPv1) NextLayerType() gopacket.LayerType {
 	//return gopacket.LayerTypePayload
